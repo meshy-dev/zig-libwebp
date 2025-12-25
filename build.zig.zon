@@ -1,0 +1,21 @@
+.{
+    .name = .libwebp,
+    .version = "1.6.0",
+    .minimum_zig_version = "0.15.1",
+    .fingerprint = 0xa2496aa744655137,
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+    },
+    .dependencies = .{
+        .libwebp = .{
+            .url = "https://chromium.googlesource.com/webm/libwebp/+archive/4fa21912338357f89e4fd51cf2368325b59e9bd9.tar.gz",
+            .hash = "N-V-__8AAEIyewDs-Qt2FWog6ZRUCvQm_27MKKOfSk54_teC",
+        },
+        .zlib = .{ .url = "git+https://github.com/allyourcodebase/zlib#8a8161babd4b79ea47d5a5976337a96ac4a5666b", .hash = "zlib-1.3.1-ZZQ7lbYMAAAuaZnFj2675ah508w1Oc-EuY1V1cWJka2C" },
+        .libpng = .{
+            .url = "git+https://github.com/allyourcodebase/libpng.git#4783adcb3b8ed0e3d5032a3434059be594755f57",
+            .hash = "libpng-1.6.53-oiaFGtwqAAB2XTxMgi4dG96BUO-0_BtUFtxKraIwq6-w",
+        },
+    },
+}
