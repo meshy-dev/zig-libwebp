@@ -1,5 +1,12 @@
 const std = @import("std");
 
+// Import appropriate parsing module based on Zig version
+// Zig 0.15.1 has std.fs.cwd(), Zig master uses new Io API
+const parse = if (@hasDecl(std.fs, "cwd"))
+    @import("parse.zig")
+else
+    @import("parse_newio.zig");
+
 pub fn build(b: *std.Build) !void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
@@ -14,6 +21,17 @@ pub fn build(b: *std.Build) !void {
         "-DHAVE_MALLOC_H",
     });
 
+    // Create scanner instance - handles version-specific I/O
+    // For Zig 0.15.1: io parameter is ignored (void)
+    // For Zig master: io parameter is b.graph.io
+    const io = if (@hasDecl(std.fs, "cwd")) {} else b.graph.io;
+    const scanner = parse.MakefileScanner.init(
+        b.allocator,
+        io,
+        upstream.path(""),
+        b,
+    );
+
     // Core libwebp static library
     const webp_mod = b.createModule(.{
         .target = target,
@@ -25,7 +43,45 @@ pub fn build(b: *std.Build) !void {
     webp_mod.addIncludePath(upstream.path("src"));
     webp_mod.addIncludePath(b.path(""));
 
-    webp_mod.addCSourceFiles(.{ .root = upstream.path(""), .files = webp_srcs, .flags = common_flags.items });
+    // Parse Makefile.am files to extract source lists
+    const sharpyuv_srcs = try scanner.parseMakefileAm("sharpyuv", "libsharpyuv_la");
+    defer b.allocator.free(sharpyuv_srcs);
+
+    const dec_srcs = try scanner.parseMakefileAm("src/dec", "libwebpdecode_la");
+    defer b.allocator.free(dec_srcs);
+
+    // Parse DSP sources - libwebpdsp_la includes COMMON and ENC sources
+    const dsp_srcs = try scanner.parseMakefileAm("src/dsp", "libwebpdsp_la");
+    defer b.allocator.free(dsp_srcs);
+
+    const enc_srcs = try scanner.parseMakefileAm("src/enc", "libwebpencode_la");
+    defer b.allocator.free(enc_srcs);
+
+    // Parse utils sources - libwebputils_la includes COMMON and ENC sources
+    const utils_srcs = try scanner.parseMakefileAm("src/utils", "libwebputils_la");
+    defer b.allocator.free(utils_srcs);
+
+    // Combine all sources
+    var webp_srcs: std.ArrayList([]const u8) = .empty;
+    defer webp_srcs.deinit(b.allocator);
+    try webp_srcs.appendSlice(b.allocator, sharpyuv_srcs);
+    try webp_srcs.appendSlice(b.allocator, dec_srcs);
+    try webp_srcs.appendSlice(b.allocator, dsp_srcs);
+    try webp_srcs.appendSlice(b.allocator, enc_srcs);
+    try webp_srcs.appendSlice(b.allocator, utils_srcs);
+
+    // Also include SIMD files via glob patterns (similar to CMake approach)
+    // These are defined in separate library targets in Makefile.am but need to be included
+    const simd_patterns = [_][]const u8{ "sharpyuv", "src/dsp" };
+    const simd_extensions = [_][]const u8{ "_sse2.c", "_sse41.c", "_avx2.c", "_neon.c", "_mips32.c", "_mips_dsp_r2.c", "_msa.c" };
+
+    for (simd_patterns) |pattern_dir| {
+        const simd_files = try scanner.findSimdFiles(pattern_dir, &simd_extensions);
+        defer b.allocator.free(simd_files);
+        try webp_srcs.appendSlice(b.allocator, simd_files);
+    }
+
+    webp_mod.addCSourceFiles(.{ .root = upstream.path(""), .files = try webp_srcs.toOwnedSlice(b.allocator), .flags = common_flags.items });
     const webp = b.addLibrary(.{
         .name = "webp",
         .linkage = .static,
@@ -42,10 +98,9 @@ pub fn build(b: *std.Build) !void {
     });
     webpdemux_mod.addIncludePath(upstream.path(""));
     webpdemux_mod.addIncludePath(upstream.path("src"));
-    webpdemux_mod.addCSourceFiles(.{ .root = upstream.path(""), .files = &.{
-        "src/demux/anim_decode.c",
-        "src/demux/demux.c",
-    }, .flags = common_flags.items });
+    const demux_srcs = try scanner.parseMakefileAm("src/demux", "libwebpdemux_la");
+    defer b.allocator.free(demux_srcs);
+    webpdemux_mod.addCSourceFiles(.{ .root = upstream.path(""), .files = demux_srcs, .flags = common_flags.items });
     const webpdemux = b.addLibrary(.{
         .name = "webpdemux",
         .linkage = .static,
@@ -60,12 +115,9 @@ pub fn build(b: *std.Build) !void {
     });
     webpmux_mod.addIncludePath(upstream.path(""));
     webpmux_mod.addIncludePath(upstream.path("src"));
-    webpmux_mod.addCSourceFiles(.{ .root = upstream.path(""), .files = &.{
-        "src/mux/anim_encode.c",
-        "src/mux/muxedit.c",
-        "src/mux/muxinternal.c",
-        "src/mux/muxread.c",
-    }, .flags = common_flags.items });
+    const mux_srcs = try scanner.parseMakefileAm("src/mux", "libwebpmux_la");
+    defer b.allocator.free(mux_srcs);
+    webpmux_mod.addCSourceFiles(.{ .root = upstream.path(""), .files = mux_srcs, .flags = common_flags.items });
     const webpmux = b.addLibrary(.{
         .name = "webpmux",
         .linkage = .static,
@@ -277,131 +329,3 @@ pub fn build(b: *std.Build) !void {
 
     webp.installHeadersDirectory(upstream.path("src/webp"), "webp", .{ .include_extensions = &.{".h"} });
 }
-
-const webp_srcs: []const []const u8 = &.{
-    // sharpyuv
-    "sharpyuv/sharpyuv.c",
-    "sharpyuv/sharpyuv_cpu.c",
-    "sharpyuv/sharpyuv_csp.c",
-    "sharpyuv/sharpyuv_dsp.c",
-    "sharpyuv/sharpyuv_gamma.c",
-    "sharpyuv/sharpyuv_neon.c",
-    "sharpyuv/sharpyuv_sse2.c",
-    // dec
-    "src/dec/alpha_dec.c",
-    "src/dec/buffer_dec.c",
-    "src/dec/frame_dec.c",
-    "src/dec/idec_dec.c",
-    "src/dec/io_dec.c",
-    "src/dec/quant_dec.c",
-    "src/dec/tree_dec.c",
-    "src/dec/vp8_dec.c",
-    "src/dec/vp8l_dec.c",
-    "src/dec/webp_dec.c",
-    // dsp decoder/encoder/common
-    "src/dsp/alpha_processing.c",
-    "src/dsp/alpha_processing_mips_dsp_r2.c",
-    "src/dsp/alpha_processing_neon.c",
-    "src/dsp/alpha_processing_sse2.c",
-    "src/dsp/alpha_processing_sse41.c",
-    "src/dsp/cpu.c",
-    "src/dsp/dec.c",
-    "src/dsp/dec_clip_tables.c",
-    "src/dsp/dec_mips32.c",
-    "src/dsp/dec_mips_dsp_r2.c",
-    "src/dsp/dec_msa.c",
-    "src/dsp/dec_neon.c",
-    "src/dsp/dec_sse2.c",
-    "src/dsp/dec_sse41.c",
-    "src/dsp/filters.c",
-    "src/dsp/filters_mips_dsp_r2.c",
-    "src/dsp/filters_msa.c",
-    "src/dsp/filters_neon.c",
-    "src/dsp/filters_sse2.c",
-    "src/dsp/lossless.c",
-    "src/dsp/lossless_mips_dsp_r2.c",
-    "src/dsp/lossless_msa.c",
-    "src/dsp/lossless_neon.c",
-    "src/dsp/lossless_sse2.c",
-    "src/dsp/lossless_sse41.c",
-    "src/dsp/lossless_avx2.c",
-    "src/dsp/rescaler.c",
-    "src/dsp/rescaler_mips32.c",
-    "src/dsp/rescaler_mips_dsp_r2.c",
-    "src/dsp/rescaler_msa.c",
-    "src/dsp/rescaler_neon.c",
-    "src/dsp/rescaler_sse2.c",
-    "src/dsp/ssim.c",
-    "src/dsp/ssim_sse2.c",
-    "src/dsp/upsampling.c",
-    "src/dsp/upsampling_mips_dsp_r2.c",
-    "src/dsp/upsampling_msa.c",
-    "src/dsp/upsampling_neon.c",
-    "src/dsp/upsampling_sse2.c",
-    "src/dsp/upsampling_sse41.c",
-    "src/dsp/yuv.c",
-    "src/dsp/yuv_mips32.c",
-    "src/dsp/yuv_mips_dsp_r2.c",
-    "src/dsp/yuv_neon.c",
-    "src/dsp/yuv_sse2.c",
-    "src/dsp/yuv_sse41.c",
-    // utils
-    "src/utils/bit_reader_utils.c",
-    "src/utils/bit_writer_utils.c",
-    "src/utils/color_cache_utils.c",
-    "src/utils/huffman_encode_utils.c",
-    "src/utils/filters_utils.c",
-    "src/utils/huffman_utils.c",
-    "src/utils/palette.c",
-    "src/utils/quant_levels_dec_utils.c",
-    "src/utils/quant_levels_utils.c",
-    "src/utils/random_utils.c",
-    "src/utils/rescaler_utils.c",
-    "src/utils/thread_utils.c",
-    "src/utils/utils.c",
-    // dsp enc
-    "src/dsp/cost.c",
-    "src/dsp/cost_mips32.c",
-    "src/dsp/cost_mips_dsp_r2.c",
-    "src/dsp/cost_neon.c",
-    "src/dsp/cost_sse2.c",
-    "src/dsp/enc.c",
-    "src/dsp/enc_mips32.c",
-    "src/dsp/enc_mips_dsp_r2.c",
-    "src/dsp/enc_msa.c",
-    "src/dsp/enc_neon.c",
-    "src/dsp/enc_sse2.c",
-    "src/dsp/enc_sse41.c",
-    "src/dsp/lossless_enc.c",
-    "src/dsp/lossless_enc_mips32.c",
-    "src/dsp/lossless_enc_mips_dsp_r2.c",
-    "src/dsp/lossless_enc_msa.c",
-    "src/dsp/lossless_enc_neon.c",
-    "src/dsp/lossless_enc_sse2.c",
-    "src/dsp/lossless_enc_sse41.c",
-    "src/dsp/lossless_enc_avx2.c",
-    // encoder
-    "src/enc/alpha_enc.c",
-    "src/enc/analysis_enc.c",
-    "src/enc/backward_references_cost_enc.c",
-    "src/enc/backward_references_enc.c",
-    "src/enc/config_enc.c",
-    "src/enc/cost_enc.c",
-    "src/enc/filter_enc.c",
-    "src/enc/frame_enc.c",
-    "src/enc/histogram_enc.c",
-    "src/enc/iterator_enc.c",
-    "src/enc/near_lossless_enc.c",
-    "src/enc/picture_csp_enc.c",
-    "src/enc/picture_enc.c",
-    "src/enc/picture_psnr_enc.c",
-    "src/enc/picture_rescale_enc.c",
-    "src/enc/picture_tools_enc.c",
-    "src/enc/predictor_enc.c",
-    "src/enc/quant_enc.c",
-    "src/enc/syntax_enc.c",
-    "src/enc/token_enc.c",
-    "src/enc/tree_enc.c",
-    "src/enc/vp8l_enc.c",
-    "src/enc/webp_enc.c",
-};
