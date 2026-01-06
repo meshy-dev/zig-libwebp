@@ -31,6 +31,8 @@ pub fn build(b: *std.Build) !void {
         .linkage = .static,
         .root_module = webp_mod,
     });
+    // Expose webp headers for consumers (e.g., #include <webp/decode.h>)
+    webp.root_module.addIncludePath(upstream.path("src"));
 
     // webpdemux static library
     const webpdemux_mod = b.createModule(.{
@@ -273,7 +275,7 @@ pub fn build(b: *std.Build) !void {
     b.installArtifact(webpdemux);
     b.installArtifact(webpmux);
 
-    webp.installHeadersDirectory(upstream.path("src"), "webp", .{ .include_extensions = &.{".h"} });
+    webp.installHeadersDirectory(upstream.path("src/webp"), "webp", .{ .include_extensions = &.{".h"} });
 }
 
 const webp_srcs: []const []const u8 = &.{
