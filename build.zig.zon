@@ -6,6 +6,9 @@
     .paths = .{
         "build.zig",
         "build.zig.zon",
+        "simd.zig",
+        "parse.zig",
+        "parse_newio.zig",
     },
     .dependencies = .{
         .libwebp = .{
